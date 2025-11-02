@@ -573,26 +573,111 @@ def cv_split(data, k, k_CV=10, n_blocks=10):
     
     return data_train, data_test, train_switch_indices, test_switch_indices
 
-    """Plot ground-truth and predicted traces for a test fold."""
+class DecoderDataset:
+    """
+    parameters:
+    -----------
+    X: (N, T) continuous features, e.g., spike rates
+    Y: (T,) discrete targets in [0, K-1], e.g., position bin indices
+    """
 
-    adjusted_test_switch_ind = [ind - sequence_length * k for k, ind in enumerate(test_switch_ind)]
-    behavior_dim = targets.shape[1]
-    _, ax = plt.subplots(behavior_dim, 1, figsize=(20, 10), sharex=True)
-    if behavior_dim == 1:
-        ax = [ax]
-    for i in range(behavior_dim):
-        ax[i].plot(targets[:, i], label='True', color="crimson")
-        ax[i].plot(predictions[:, i], label='Predicted')
-        for ind in adjusted_test_switch_ind:
-            ax[i].axvline(ind, color="grey", linestyle="--", alpha=0.5)
+    def __init__(self, X: np.ndarray, Y: np.ndarray):
+        if X.ndim != 2:
+            raise ValueError("X must have shape (N, T)")
+        if Y.ndim != 1:
+            raise ValueError("Y must have shape (T,)")
+        if X.shape[1] != Y.shape[0]:
+            raise ValueError("X.shape[1] must equal Y.shape[0]")
+        self.X = X
+        self.Y = Y
 
-    if behavior_dim > 4:
-        # remove the y-axis ticks
-        for a in ax:
-            a.set_yticks([])
-    plt.xlabel('Time')
-    ax[0].legend(loc='upper right')
+    def split(self, k: int, k_CV: int = 10, n_blocks: int = 10):
+        """
+        Splits the dataset into training and testing sets for k-fold cross-validation.
 
-    sns.despine()
-    plt.savefig(os.path.join(save_path, f'lstm_predictions_k_{k}_shift_{shift}.png'), dpi=300)
-    plt.close()
+        Returns:
+        (X_train, Y_train), (X_test, Y_test), train_switch_ind, test_switch_ind
+        """
+        X_train, X_test, train_switch_ind, test_switch_ind = cv_split(self.X.T, k, k_CV, n_blocks)
+        Y_train, Y_test, _, _ = cv_split(self.Y, k, k_CV, n_blocks)
+        return (X_train.T, Y_train.T), (X_test.T, Y_test.T), train_switch_ind, test_switch_ind
+
+
+class GaussianBayesDecoder:
+    """
+    A Gaussian Naive Bayes decoder for discrete states based on continuous observations.
+    """
+
+    def __init__(self, n_bins: int, var_floor: float = 1e-4, uniform_prior: bool = False):
+        self.n_bins = n_bins
+        self.var_floor = var_floor
+        self.uniform_prior = uniform_prior
+
+        self.mu_ = None
+        self.var_ = None
+        self.log_prior_ = None
+
+    def fit(self, X: np.ndarray, Y: np.ndarray):
+        """
+        Fit the Gaussian Naive Bayes model to the training data.
+        X: (N, T) features
+        Y: (T,) labels
+        """
+        if X.ndim != 2 or Y.ndim != 1 or X.shape[1] != Y.shape[0]:
+            raise ValueError("X must be (N, T) and Y must be (T,) with matching timepoints.")
+
+        N, T = X.shape
+        K = self.n_bins
+
+        self.mu_ = np.zeros((N, K))
+        self.var_ = np.zeros((N, K))
+        self.log_prior_ = np.zeros(K)
+
+        # Compute mean and variance per bin
+        for k in range(K):
+            idx = (Y == k)
+            if np.any(idx):
+                X_k = X[:, idx]
+                self.mu_[:, k] = X_k.mean(axis=1)
+                v = X_k.var(axis=1)
+                self.var_[:, k] = np.maximum(v, self.var_floor)
+            else:
+                self.var_[:, k] = self.var_floor
+
+        # Compute priors
+        if self.uniform_prior:
+            self.log_prior_[:] = -np.log(K)
+        else:
+            counts = np.bincount(Y, minlength=K)
+            probs = (counts + 1) / (counts.sum() + K)  # Laplace smoothing
+            self.log_prior_ = np.log(probs)
+
+        return self
+
+    def predict_log_probabilities(self, X: np.ndarray):
+        """
+        Predict log-probabilities log p(y=k | x)
+        Returns: (K, T)
+        """
+        if self.mu_ is None or self.var_ is None or self.log_prior_ is None:
+            raise RuntimeError("Model must be fitted before calling predict_log_probabilities().")
+
+        N, T = X.shape
+        K = self.n_bins
+        log_probs = np.zeros((K, T))
+        two_pi = 2 * np.pi
+
+        for k in range(K):
+            mu_k = self.mu_[:, [k]]
+            var_k = self.var_[:, [k]]
+            const_term = -0.5 * np.sum(np.log(two_pi * var_k))
+            quad_term = -0.5 * np.sum(((X - mu_k) ** 2) / var_k, axis=0)
+            log_probs[k, :] = const_term + quad_term + self.log_prior_[k]
+
+        # numerical stability
+        m = log_probs.max(axis=0, keepdims=True)
+        return log_probs - m
+
+    def predict(self, X: np.ndarray):
+        """Return MAP class indices (argmax over log-probabilities)."""
+        return np.argmax(self.predict_log_probabilities(X), axis=0)
