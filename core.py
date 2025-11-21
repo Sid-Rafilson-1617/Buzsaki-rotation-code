@@ -449,6 +449,24 @@ def collect_matrix_for(spike_rate_matrices, region_name, regions, cell_type_key,
     return np.vstack(collected)
 
 
+def collect_matrix_for_bilat(spike_rate_matrices, region_name, regions, cell_type_key, cell_types, probes, cell_type_groups, hemi, hemisphere_dict):
+
+    labels = set(cell_type_groups[cell_type_key])
+    collected = []
+    for p in probes:
+        mat, _, _ = spike_rate_matrices[p]
+        ct  = cell_types[p]
+        rgn = regions[p]
+        hemisphere = hemisphere_dict[p]
+        # Boolean mask: matching region + cell-type (after previous filtering)
+        mask = (rgn == region_name) & np.isin(ct, list(labels)) & (hemisphere == hemi)
+        if np.any(mask):
+            collected.append(mat[mask, :])
+    if len(collected) == 0:
+        return None
+    return np.vstack(collected)
+
+
 # ---- Optional within-panel unit ordering: sort units by peak time or mean rate
 def sort_units(matrix, mode='corr'):  # 'mean', 'peak', or 'corr'
     if matrix is None or matrix.shape[0] == 0:

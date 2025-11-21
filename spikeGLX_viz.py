@@ -379,6 +379,9 @@ def shankMapToGeom(meta):
     # SYNC entry in the snsChanMap)
     AP, LF, SY = ChannelCountsIM(meta)
 
+
+
+
     shankMap = meta['snsShankMap'].split(sep=')')
     
     shankInd = np.zeros((AP,))
@@ -446,6 +449,10 @@ def plotSaved(xCoord, yCoord, shankInd, meta):
     
     shankSep = geomList[2]
     
+    # print total number of shank Inds
+
+
+
     # loop over shanks
     for sI in range(geomList[0]):
         
@@ -634,6 +641,8 @@ def MetaToCoords(metaFullPath, outType, badChan= np.zeros((0), dtype = 'int'), d
         
     [AP,LF,SY] = ChannelCountsIM(meta)    
     chans = np.arange(AP)
+
+    print('Number of saved AP channels: {:d}'.format(AP))
     
     # Channels identified as noisy by kilosort helper indexed
     # according to position in the file
