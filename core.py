@@ -47,7 +47,7 @@ def _load_cluster_labels(kilosort_dir: str) -> pd.DataFrame:
     out["label"] = out["label"].astype(str).str.lower()
     return out
 
-def compute_spike_rates(kilosort_dir: str, window_size: float = 1.0, step_size: float = 0.5, use_units: str = 'all', sigma: float = 2.5, zscore: bool = True):
+def compute_spike_rates(kilosort_dir: str, window_size: float = 1.0, step_size: float = 0.5, use_units: str = 'all', sigma: float = 2.5, zscore: bool = True, adj = None):
     
     """
     Compute smoothed spike rates using a sliding window approach from Kilosort output data.
@@ -95,7 +95,7 @@ def compute_spike_rates(kilosort_dir: str, window_size: float = 1.0, step_size: 
     """    
 
     # Load spike times and cluster assignments
-    spike_times_path = os.path.join(kilosort_dir, "spike_times.npy")
+    spike_times_path = os.path.join(kilosort_dir, f"spike_times{adj}.npy")
     spike_clusters_path = os.path.join(kilosort_dir, "spike_clusters.npy")  # Cluster assignments from Phy2 manual curation
 
 
