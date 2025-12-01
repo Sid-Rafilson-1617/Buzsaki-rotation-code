@@ -116,7 +116,10 @@ def compute_spike_rates(kilosort_dir: str, window_size: float = 1.0, step_size: 
         raise FileNotFoundError("Missing required Kilosort output files.")
 
     # Loading spikes
-    spike_times = np.load(spike_times_path) / sampling_rate  # Convert to seconds
+    if adj == '_sec_adj':
+        spike_times = np.load(spike_times_path)  # Already in seconds
+    else:
+        spike_times = np.load(spike_times_path) / sampling_rate  # Convert to seconds
     spike_clusters = np.load(spike_clusters_path)
 
     # load cluster labels
