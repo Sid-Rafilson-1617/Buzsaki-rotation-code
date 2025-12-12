@@ -18,9 +18,9 @@ def _load_cluster_labels(kilosort_dir: str) -> pd.DataFrame:
     """
     Load a Phy/Kilosort cluster label file that includes:
       cluster_id, KSLabel (or 'group')
-    Prefers 'cluster_KSLabel.tsv' in your folder; falls back to 'cluster_group.tsv'.
+    Prefers 'cluster_group.tsv' or 'cluster_KSLabel.tsv' in your folder; falls back to 'cluster_group.tsv'.
     """
-    candidates = ["cluster_KSLabel.tsv", "cluster_group.tsv"]
+    candidates = ["cluster_group.tsv", "cluster_KSLabel.tsv", "cluster_group.tsv"]
     path = None
     for fn in candidates:
         p = os.path.join(kilosort_dir, fn)
