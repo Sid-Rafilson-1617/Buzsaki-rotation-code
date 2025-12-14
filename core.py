@@ -212,6 +212,181 @@ def compute_spike_rates(kilosort_dir: str, window_size: float = 1.0, step_size: 
     return spike_rate_matrix, time_bins, units
 
 
+
+def compute_spike_counts(
+    kilosort_dir: str,
+    window_size: float = 1.0,
+    step_size: float = 0.5,
+    use_units: str = 'all',
+    sigma: float = 2.5,
+    zscore: bool = True,
+    adj = None,
+):
+    """
+    Compute spike counts using a sliding window approach from Kilosort output data.
+    
+    This function processes spike times and cluster assignments from Kilosort/Phy2, filters
+    units by label, and computes spike counts within overlapping sliding windows. Optionally,
+    Gaussian smoothing and z-scoring can be applied across time for each unit.
+
+    Parameters
+    ----------
+    kilosort_dir : str
+        Path to the directory containing Kilosort output files.
+    window_size : float, optional
+        Size of the sliding window in seconds, default is 1.0.
+    step_size : float, optional
+        Step size for sliding window advancement in seconds, default is 0.5.
+    use_units : str, optional
+        Filter for unit types to include:
+        - 'all': Include all units
+        - 'good': Include only good units
+        - 'mua': Include only multi-unit activity
+        - 'good/mua': Include both good units and multi-unit activity
+        - 'noise': Include only noise units
+        Default is 'all'.
+    sigma : float, optional
+        Standard deviation (in window steps) for Gaussian smoothing kernel. If 0 or None,
+        no smoothing is applied. Default is 2.5.
+    zscore : bool, optional
+        Whether to z-score the spike counts over time for each unit, default is True.
+    adj : str or None, optional
+        Suffix for spike_times file (e.g., '_sec_adj'), consistent with your existing code.
+
+    Returns
+    -------
+    spike_count_matrix : ndarray
+        Matrix of spike counts (shape: num_units × num_windows).
+    time_bins : ndarray
+        Array of starting times for each window (seconds).
+    units : ndarray
+        Array of unit (cluster) IDs corresponding to rows of `spike_count_matrix`.
+
+    Notes
+    -----
+    - Counts are raw spike counts per window before optional smoothing/z-scoring.
+      To get rates later, you can divide by `window_size`.
+    """
+
+    # Paths to Kilosort outputs
+    spike_times_path = os.path.join(kilosort_dir, f"spike_times{adj}.npy")
+    spike_clusters_path = os.path.join(kilosort_dir, "spike_clusters.npy")
+
+    # Extract sampling rate from params.py
+    params_path = os.path.join(kilosort_dir, "params.py")
+    if not os.path.exists(params_path):
+        raise FileNotFoundError(f"params.py not found in {kilosort_dir}")
+    with open(params_path, 'r') as f:
+        params_content = f.read()
+    sampling_rate_line = [line for line in params_content.splitlines()
+                          if 'sample_rate' in line]
+    if not sampling_rate_line:
+        raise ValueError("sample_rate not found in params.py")
+    sampling_rate = float(sampling_rate_line[0].split('=')[1].strip())
+
+    # Ensure required files exist
+    if not all(os.path.exists(p) for p in [spike_times_path, spike_clusters_path]):
+        raise FileNotFoundError("Missing required Kilosort output files.")
+
+    # Load spikes
+    if adj == '_sec_adj':
+        spike_times = np.load(spike_times_path)  # already in seconds
+    else:
+        spike_times = np.load(spike_times_path) / sampling_rate  # convert to seconds
+    spike_clusters = np.load(spike_clusters_path)
+
+    # Load cluster labels (your helper)
+    info = _load_cluster_labels(kilosort_dir)
+
+    # Decide which units to keep based on labels
+    use_units = use_units.lower()
+    if use_units == "all":
+        keep_ids = info["cluster_id"].values
+    elif use_units == "good":
+        keep_ids = info.loc[info["label"].eq("good"), "cluster_id"].values
+    elif use_units == "mua":
+        keep_ids = info.loc[info["label"].eq("mua"), "cluster_id"].values
+    elif use_units in ("good/mua", "good+mua", "goodmua"):
+        keep_ids = info.loc[info["label"].isin(["good", "mua"]), "cluster_id"].values
+    elif use_units == "noise":
+        keep_ids = info.loc[info["label"].eq("noise"), "cluster_id"].values
+    else:
+        raise ValueError(f"Unknown use_units='{use_units}'")
+
+    # Filter spikes to kept units
+    keep_mask = np.isin(spike_clusters, keep_ids)
+    spike_times = spike_times[keep_mask]
+    spike_clusters = spike_clusters[keep_mask]
+
+    # Return early if no spikes
+    if spike_times.size == 0:
+        return (
+            np.zeros((0, 0), dtype=np.float64),
+            np.zeros((0,), dtype=np.float64),
+            np.array([], dtype=int),
+        )
+
+    # Total duration of recording
+    recording_duration = float(spike_times.max())
+    if recording_duration < window_size:
+        # No full window fits; return empty with units list
+        units = np.unique(spike_clusters)
+        return (
+            np.zeros((len(units), 0), dtype=np.float64),
+            np.zeros((0,), dtype=np.float64),
+            units,
+        )
+
+    # Number of windows and their start times
+    num_windows = 1 + int(np.floor((recording_duration - window_size) / step_size))
+    time_bins = np.arange(num_windows, dtype=np.float64) * step_size  # window starts
+
+    # Assign each spike to a window start index
+    start_idx = np.floor(spike_times / step_size).astype(np.int64)
+    valid = (start_idx >= 0) & (start_idx < num_windows)
+    start_idx = start_idx[valid]
+    spike_times_v = spike_times[valid]
+    spike_clusters_v = spike_clusters[valid]
+
+    # Guard against spikes that land in a start bin whose window would end before the spike
+    win_end = (start_idx * step_size) + window_size
+    valid2 = spike_times_v < win_end
+    start_idx = start_idx[valid2]
+    spike_clusters_v = spike_clusters_v[valid2]
+
+    # Map units to row indices
+    units = np.unique(spike_clusters_v)  # actual units present post-filter
+    unit_to_row = {u: i for i, u in enumerate(units)}
+    rows = np.fromiter(
+        (unit_to_row[u] for u in spike_clusters_v),
+        dtype=np.int64,
+        count=spike_clusters_v.size,
+    )
+
+    # Accumulate counts: (unit, window) -> spike count
+    spike_count_matrix = np.zeros((units.size, num_windows), dtype=np.float64)
+    np.add.at(spike_count_matrix, (rows, start_idx), 1.0)
+
+    # Optional smoothing (on counts)
+    if sigma and sigma > 0:
+        for r in range(spike_count_matrix.shape[0]):
+            spike_count_matrix[r, :] = gaussian_filter1d(
+                spike_count_matrix[r, :],
+                sigma=sigma,
+                mode='nearest',
+            )
+
+    # Optional z-score per unit
+    if zscore:
+        mean = spike_count_matrix.mean(axis=1, keepdims=True)
+        std = spike_count_matrix.std(axis=1, keepdims=True)
+        std[std == 0] = 1.0
+        spike_count_matrix = (spike_count_matrix - mean) / std
+
+    return spike_count_matrix, time_bins, units
+
+
+
 def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, units: np.ndarray, time_bins: np.ndarray, window_size: float = 0.1, speed_threshold: float = 4.0, interp_method='linear', order=None):
     
     """
@@ -701,4 +876,158 @@ class GaussianBayesDecoder:
 
     def predict(self, X: np.ndarray):
         """Return MAP class indices (argmax over log-probabilities)."""
+        return np.argmax(self.predict_log_probabilities(X), axis=0)
+
+
+class PoissonBayesDecoder:
+    """
+    A Poisson Naive Bayes decoder for discrete states based on count observations.
+    
+    Assumes:
+        X[n, t] ~ Poisson( lambda_{n, y_t} )
+    with conditional independence across features n given the state y_t.
+    """
+
+    def __init__(self, n_bins: int, rate_floor: float = 1e-4, uniform_prior: bool = False):
+        """
+        Parameters
+        ----------
+        n_bins : int
+            Number of discrete states / bins.
+        rate_floor : float, default=1e-4
+            Minimum firing rate (counts per bin) to avoid log(0).
+        uniform_prior : bool, default=False
+            If True, use a uniform prior over bins.
+            If False, use Laplace-smoothed empirical priors.
+        """
+        self.n_bins = n_bins
+        self.rate_floor = rate_floor
+        self.uniform_prior = uniform_prior
+
+        self.rate_ = None        # (N, K) Poisson rates lambda_{n,k}
+        self.log_rate_ = None    # (N, K) log(lambda_{n,k})
+        self.log_prior_ = None   # (K,)
+
+    def fit(self, X: np.ndarray, Y: np.ndarray):
+        """
+        Fit the Poisson Naive Bayes model to the training data.
+
+        Parameters
+        ----------
+        X : np.ndarray, shape (N, T)
+            Feature matrix (e.g., spike counts). N features, T timepoints.
+        Y : np.ndarray, shape (T,)
+            Discrete state labels in {0, ..., n_bins-1} for each timepoint.
+
+        Returns
+        -------
+        self
+        """
+        X = np.asarray(X)
+        Y = np.asarray(Y)
+
+        if X.ndim != 2 or Y.ndim != 1 or X.shape[1] != Y.shape[0]:
+            raise ValueError("X must be (N, T) and Y must be (T,) with matching timepoints.")
+
+        N, T = X.shape
+        K = self.n_bins
+
+        self.rate_ = np.full((N, K), self.rate_floor, dtype=float)
+        self.log_prior_ = np.zeros(K, dtype=float)
+
+        # Estimate Poisson rates per neuron per bin: lambda_{n,k} = mean count
+        for k in range(K):
+            idx = (Y == k)
+            if np.any(idx):
+                X_k = X[:, idx]  # (N, T_k)
+                # Empirical mean count; floor to avoid zero
+                lam = X_k.mean(axis=1)
+                self.rate_[:, k] = np.maximum(lam, self.rate_floor)
+            # if no samples for this bin, leave rate_ at rate_floor
+
+        # Precompute log rates
+        self.log_rate_ = np.log(self.rate_)
+
+        # Compute priors p(y=k)
+        if self.uniform_prior:
+            self.log_prior_[:] = -np.log(K)
+        else:
+            # Laplace-smoothed empirical prior
+            Y_int = Y.astype(int)
+            if np.any((Y_int < 0) | (Y_int >= K)):
+                raise ValueError("Y contains labels outside [0, n_bins-1].")
+            counts = np.bincount(Y_int, minlength=K)
+            probs = (counts + 1) / (counts.sum() + K)  # Laplace smoothing
+            self.log_prior_ = np.log(probs)
+
+        return self
+
+    def predict_log_probabilities(self, X: np.ndarray):
+        """
+        Compute log p(y = k | x) up to an additive constant (per timepoint).
+
+        Parameters
+        ----------
+        X : np.ndarray, shape (N, T)
+            Feature matrix (e.g., spike counts) for which to decode states.
+
+        Returns
+        -------
+        log_probs : np.ndarray, shape (K, T)
+            Log-posterior probabilities up to a per-timepoint constant.
+            Values are shifted for numerical stability such that, for each t,
+            max_k log_probs[k, t] = 0.
+        """
+        if self.rate_ is None or self.log_rate_ is None or self.log_prior_ is None:
+            raise RuntimeError("Model must be fitted before calling predict_log_probabilities().")
+
+        X = np.asarray(X)
+        if X.ndim != 2:
+            raise ValueError("X must be 2D with shape (N, T).")
+
+        N, T = X.shape
+        K = self.n_bins
+
+        if N != self.rate_.shape[0]:
+            raise ValueError(f"X has {N} features, but model was fitted with {self.rate_.shape[0]} features.")
+
+        log_probs = np.zeros((K, T), dtype=float)
+
+        # For Poisson:
+        #   log p(x | y=k) = sum_n [ x_n * log(lambda_{n,k}) - lambda_{n,k} - log(x_n!) ]
+        # The term -log(x_n!) does not depend on k, so we can drop it when comparing bins.
+        for k in range(K):
+            log_lambda_k = self.log_rate_[:, [k]]  # (N, 1)
+            lambda_k = self.rate_[:, [k]]          # (N, 1)
+
+            # (N, T): x_n,t * log lambda_{n,k}
+            x_log_lambda = X * log_lambda_k
+            # (N, T): subtract lambda_{n,k} (same across time for each neuron)
+            # broadcast across T:
+            x_log_lambda_minus_lambda = x_log_lambda - lambda_k
+
+            # Sum over neurons to get log-likelihood per timepoint
+            log_likelihood = x_log_lambda_minus_lambda.sum(axis=0)  # (T,)
+
+            # Add log prior
+            log_probs[k, :] = log_likelihood + self.log_prior_[k]
+
+        # Numerical stability: subtract max over k per timepoint
+        m = log_probs.max(axis=0, keepdims=True)
+        return log_probs - m
+
+    def predict(self, X: np.ndarray):
+        """
+        Return MAP class indices argmax_k log p(y=k | x).
+
+        Parameters
+        ----------
+        X : np.ndarray, shape (N, T)
+            Feature matrix.
+
+        Returns
+        -------
+        y_hat : np.ndarray, shape (T,)
+            Predicted bin indices.
+        """
         return np.argmax(self.predict_log_probabilities(X), axis=0)
